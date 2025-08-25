@@ -8,13 +8,12 @@ router = APIRouter(prefix="/sales", tags=["sales"])
 @router.post("", response_model=SaleResponse)
 def create_sale(
     body: SaleCreate,
-    current_user: dict = Depends(require_role("superadmin"))  # 🔒 Solo superadmin puede registrar ventas
+    current_user: dict = Depends(require_role("superadmin"))  # solo valida el rol
 ):
     try:
-        return SaleService.create(body, current_user)
+        return SaleService.create(body)  # 👈 ya no pasamos current_user
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
 
 @router.get("", response_model=list[SaleResponse])
 def list_sales(
