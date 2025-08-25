@@ -11,7 +11,7 @@ def create_sale(
     current_user: dict = Depends(require_role("superadmin"))  # solo valida el rol
 ):
     try:
-        return SaleService.create(body)  # 👈 ya no pasamos current_user
+        return SaleService.create(body) 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
