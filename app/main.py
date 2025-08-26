@@ -7,9 +7,9 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="SalesTalk API",
         version="1.0.0",
-        docs_url="/docs",           # fuerza /docs
+        docs_url="/docs",
         redoc_url="/redoc",
-        openapi_url="/openapi.json" # fuerza /openapi.json
+        openapi_url="/openapi.json",
     )
 
     app.add_middleware(
@@ -23,7 +23,6 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup():
         init_firebase()
-        # DEBUG: imprime rutas registradas
         try:
             print("=== ROUTES ===")
             for r in app.routes:
@@ -31,16 +30,16 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
-    # Raíz y health (para Render)
-    @app.get("/", include_in_schema=False)
+    # ✅ Acepta GET y HEAD en raíz
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     async def root():
         return {"status": "ok", "service": "apisalestalk", "docs": "/docs"}
 
-    @app.get("/healthz", include_in_schema=False)
+    # ✅ (Opcional) Acepta GET y HEAD en health
+    @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
     async def healthz():
         return {"ok": True}
 
-    # Routers reales
     app.include_router(auth.router)
     app.include_router(users.router)
     app.include_router(products.router)
