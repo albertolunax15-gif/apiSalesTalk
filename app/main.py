@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.firebase import init_firebase
-from app.routers import auth, users, products, sales
+from app.routers import auth, users, products, sales, nlp
 
 
 def create_app() -> FastAPI:
@@ -25,6 +25,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(products.router)
     app.include_router(sales.router)
+    app.include_router(nlp.router)
 
     return app
 
