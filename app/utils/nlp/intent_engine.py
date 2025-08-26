@@ -25,7 +25,7 @@ PAYMENT_ALIASES = {
     "banco": "Transferencia",
 }
 
-# Patrones ampliados (verbos y sinónimos)
+# Patrones ampliados (verbos y sinónimos) — robustos a variaciones del STT
 CREAR_VENTA_PATTERNS = [
     r"\b(registrar|registra|registrame)\b.*\b(venta|compra)?\b",
     r"\b(generar|genera|crear|crea|agrega|anade|añade)\b.*\b(venta|compra)?\b",
@@ -66,7 +66,9 @@ class NLPResult:
 # Utilitarios
 # =========================
 def _norm(s: str) -> str:
-    """Minúsculas, sin tildes, sin puntuación, espacios normales."""
+    """Minúsculas, sin tildes, sin puntuación, espacios normalizados."""
+    if s is None:
+        return ""
     s = s.lower()
     s = unicodedata.normalize("NFD", s)
     s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")  # quita tildes
@@ -91,7 +93,7 @@ def _guess_intent(text: str) -> tuple[str, float]:
     if _match_any(AYUDA_PATTERNS, nt):
         return "ayuda", 0.9
 
-    # 2) respaldo fuzzy (por si amplías vocabularios en el futuro)
+    # 2) respaldo fuzzy
     INTENT_KEYWORDS = {
         "crear_venta": [
             "vende", "venta", "registrar venta", "registrame",
@@ -145,9 +147,9 @@ def _extract_price(text: str) -> Optional[float]:
 def _extract_payment_method(text: str) -> Optional[str]:
     t = _norm(text)
     # alias exacto
-    for k, norm in PAYMENT_ALIASES.items():
+    for k, norm_pm in PAYMENT_ALIASES.items():
         if re.search(rf"\b{_norm(k)}\b", t):
-            return norm
+            return norm_pm
     # fuzzy sobre label oficial
     match = process.extractOne(t, PAYMENT_METHODS, scorer=fuzz.partial_ratio)
     if match and match[1] >= 85:
@@ -170,32 +172,44 @@ def _extract_date(text: str) -> Optional[datetime]:
         return None
 
 def _extract_product_name(text: str, candidate_products: Optional[List[str]]=None) -> Optional[str]:
-    raw = text
-    t = _norm(raw)
+    # Normaliza
+    t = _norm(text)
 
-    # quita números, dinero, y palabras de pago
+    # Quita números, montos y palabras de pago
     t = re.sub(r"\b\d+\b", " ", t)
     t = re.sub(r"(s\/\.?\s*\d+(?:[\.,]\d+)?|soles?)", " ", t)
     for alias in PAYMENT_ALIASES.keys():
         t = re.sub(rf"\b{_norm(alias)}\b", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
 
-    # ampliar verbos y permitir "de <producto>"
+    # Verbo + (venta|compra)? + (de)? + producto
     verb_pattern = r"(?:vende(r)?|venta|registrar|registra|registrame|agrega|anade|añade|crear|crea|generar|genera|compra|comprar)"
     m = re.search(rf"{verb_pattern}\s+(?:venta|compra)?\s*(?:de\s+)?(.+)", t)
-    if m:
-        candidate = m.group(1).strip()
-        # arregla cortes tipo "o nigiris" => "onigiris"
-        candidate = re.sub(r"\b(o|y)\b", " ", candidate)
-        candidate = re.sub(r"\s+", " ", candidate).strip()
 
-        if candidate_products:
-            match = process.extractOne(candidate, candidate_products, scorer=fuzz.token_sort_ratio)
+    candidate = None
+    if m:
+        # DEFENSIVO: evita .strip() sobre None
+        captured = m.group(1) if (m.lastindex and m.group(1) is not None) else ""
+        candidate = captured.strip()
+
+        if candidate:
+            # arregla cortes tipo "o nigiris" => "onigiris"
+            candidate = re.sub(r"\b(o|y)\b", " ", candidate)
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    # Saneo del catálogo (evita None/'' que rompen el fuzzy)
+    safe_products: Optional[List[str]] = None
+    if candidate_products:
+        safe_products = [p.strip() for p in candidate_products if isinstance(p, str) and p.strip()]
+
+    if candidate:
+        if safe_products:
+            match = process.extractOne(candidate, safe_products, scorer=fuzz.token_sort_ratio)
             if match and match[1] >= 70:
                 return match[0]
-        return candidate if candidate else None
+        return candidate
 
-    # fallback: últimas 4 palabras
+    # fallback: últimas 4 palabras del texto limpio
     parts = t.split()
     return " ".join(parts[-4:]) if parts else None
 
