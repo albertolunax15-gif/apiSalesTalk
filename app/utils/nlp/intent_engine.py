@@ -1,12 +1,16 @@
 from __future__ import annotations
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+
 from dateutil import parser as dateparser
 from rapidfuzz import fuzz, process
 
-# Diccionarios base (ajústalos según tu dominio)
+# =========================
+# Configuración / Diccionarios
+# =========================
 PAYMENT_METHODS = ["Efectivo", "Tarjeta", "Yape", "Plin", "Transferencia"]
 PAYMENT_ALIASES = {
     "efectivo": "Efectivo",
@@ -21,13 +25,27 @@ PAYMENT_ALIASES = {
     "banco": "Transferencia",
 }
 
-# Reglas: palabras clave por intent
-INTENT_KEYWORDS = {
-    "crear_venta": ["vende", "venta", "registrar venta", "registrame", "agrega venta", "añade venta", "compró", "compraron"],
-    "listar_ventas": ["lista ventas", "listar ventas", "muéstrame ventas", "ver ventas"],
-    "ayuda": ["ayuda", "qué puedes hacer", "como te uso"]
-}
+# Patrones ampliados (verbos y sinónimos)
+CREAR_VENTA_PATTERNS = [
+    r"\b(registrar|registra|registrame)\b.*\b(venta|compra)?\b",
+    r"\b(generar|genera|crear|crea|agrega|anade|añade)\b.*\b(venta|compra)?\b",
+    r"\b(vender|vende|venta)\b",
+    r"\b(compra|comprar|compro|compraron)\b",
+]
 
+LISTAR_VENTAS_PATTERNS = [
+    r"\b(lista(r)?|ver|mostrar|muestrame|muestreme|ensename)\b.*\b(ventas?)\b",
+]
+
+AYUDA_PATTERNS = [
+    r"\bayuda\b",
+    r"\bque puedes hacer\b",
+    r"\bcomo te uso\b",
+]
+
+# =========================
+# Modelos de datos
+# =========================
 @dataclass
 class ParsedSale:
     quantity: Optional[int] = None
@@ -44,33 +62,78 @@ class NLPResult:
     original_text: str
     notes: List[str]
 
+# =========================
+# Utilitarios
+# =========================
+def _norm(s: str) -> str:
+    """Minúsculas, sin tildes, sin puntuación, espacios normales."""
+    s = s.lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")  # quita tildes
+    s = re.sub(r"[^\w\s]", " ", s)  # quita puntuación
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _match_any(patterns: List[str], text: str) -> bool:
+    return any(re.search(p, text) for p in patterns)
+
+# =========================
+# Detección de intent
+# =========================
 def _guess_intent(text: str) -> tuple[str, float]:
-    t = text.lower()
+    nt = _norm(text)
+
+    # 1) reglas determinísticas (robustas)
+    if _match_any(CREAR_VENTA_PATTERNS, nt):
+        return "crear_venta", 1.0
+    if _match_any(LISTAR_VENTAS_PATTERNS, nt):
+        return "listar_ventas", 0.95
+    if _match_any(AYUDA_PATTERNS, nt):
+        return "ayuda", 0.9
+
+    # 2) respaldo fuzzy (por si amplías vocabularios en el futuro)
+    INTENT_KEYWORDS = {
+        "crear_venta": [
+            "vende", "venta", "registrar venta", "registrame",
+            "agrega venta", "añade venta", "compro", "compraron",
+            "compra", "crear venta", "genera venta"
+        ],
+        "listar_ventas": [
+            "lista ventas", "listar ventas", "muestrame ventas", "ver ventas", "mostrar ventas"
+        ],
+        "ayuda": [
+            "ayuda", "que puedes hacer", "como te uso"
+        ],
+    }
     best_intent, best_score = "ayuda", 0.0
     for intent, keys in INTENT_KEYWORDS.items():
-        score = max(fuzz.partial_ratio(t, k) for k in keys)
+        score = max(fuzz.partial_ratio(nt, _norm(k)) for k in keys)
         if score > best_score:
             best_intent, best_score = intent, score / 100.0
     return best_intent, best_score
 
+# =========================
+# Extracciones
+# =========================
 def _extract_quantity(text: str) -> Optional[int]:
-    # patrones comunes: "2", "x2", "2u", "2 und", "dos" (num palabras simple)
-    m = re.search(r"(?:x\s*)?(\d+)\s*(?:u|und|unid|unidades)?\b", text.lower())
+    t = _norm(text)
+    # dígitos: "x2", "2u", "2 und"
+    m = re.search(r"(?:x\s*)?(\d+)\s*(?:u|und|unid|unidades)?\b", t)
     if m:
         try:
             return int(m.group(1))
         except:
             return None
-    # muy básico para palabras
+    # palabras
     words_map = {"una":1,"un":1,"dos":2,"tres":3,"cuatro":4,"cinco":5,"seis":6,"siete":7,"ocho":8,"nueve":9,"diez":10}
     for w, n in words_map.items():
-        if re.search(rf"\b{w}\b", text.lower()):
+        if re.search(rf"\b{w}\b", t):
             return n
     return None
 
 def _extract_price(text: str) -> Optional[float]:
-    # "a 3.50", "S/ 4", "4 soles", "precio 2"
-    m = re.search(r"(?:s\/\.?|soles?\s*)?(\d{1,4}(?:[\.,]\d{1,2})?)\s*(?:soles?)?", text.lower())
+    t = text.lower()
+    m = re.search(r"(?:s\/\.?|soles?\s*)?(\d{1,4}(?:[\.,]\d{1,2})?)\s*(?:soles?)?", t)
     if m:
         raw = m.group(1).replace(",", ".")
         try:
@@ -80,10 +143,10 @@ def _extract_price(text: str) -> Optional[float]:
     return None
 
 def _extract_payment_method(text: str) -> Optional[str]:
-    t = text.lower()
+    t = _norm(text)
     # alias exacto
     for k, norm in PAYMENT_ALIASES.items():
-        if re.search(rf"\b{k}\b", t):
+        if re.search(rf"\b{_norm(k)}\b", t):
             return norm
     # fuzzy sobre label oficial
     match = process.extractOne(t, PAYMENT_METHODS, scorer=fuzz.partial_ratio)
@@ -92,41 +155,53 @@ def _extract_payment_method(text: str) -> Optional[str]:
     return None
 
 def _extract_date(text: str) -> Optional[datetime]:
-    t = text.lower()
+    t = _norm(text)
     if "hoy" in t:
         return datetime.now()
     if "ayer" in t:
         return datetime.now() - timedelta(days=1)
-    if "mañana" in t or "manana" in t:
+    if "manana" in t:
         return datetime.now() + timedelta(days=1)
-    # intenta parseo general (soporta "25/08 5pm", "2025-08-25", etc.)
     try:
+        # soporta "25/08 5pm", "2025-08-25", etc.
         dt = dateparser.parse(text, dayfirst=True, fuzzy=True)
         return dt
     except:
         return None
 
 def _extract_product_name(text: str, candidate_products: Optional[List[str]]=None) -> Optional[str]:
-    # Heurística: quita números y palabras de pago para dejar el núcleo
-    t = re.sub(r"\d+|s\/\.?\s*\d+(?:[\.,]\d+)?|soles?", " ", text.lower())
-    for alias in PAYMENT_ALIASES.keys():
-        t = re.sub(rf"\b{alias}\b", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    # Si hay catálogo, busca difuso
-    if candidate_products:
-        match = process.extractOne(t, candidate_products, scorer=fuzz.token_sort_ratio)
-        if match and match[1] >= 70:
-            return match[0]
-    # fallback: toma frases después de verbos de venta
-    m = re.search(r"(?:vende(?:r)?|venta|registrar|agrega|añade)\s+(.*)", t)
-    if m:
-        return m.group(1).strip()
-    # si no, devuelve algo acotado (últimas 4 palabras)
-    parts = t.split()
-    if len(parts) >= 1:
-        return " ".join(parts[-4:])
-    return None
+    raw = text
+    t = _norm(raw)
 
+    # quita números, dinero, y palabras de pago
+    t = re.sub(r"\b\d+\b", " ", t)
+    t = re.sub(r"(s\/\.?\s*\d+(?:[\.,]\d+)?|soles?)", " ", t)
+    for alias in PAYMENT_ALIASES.keys():
+        t = re.sub(rf"\b{_norm(alias)}\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # ampliar verbos y permitir "de <producto>"
+    verb_pattern = r"(?:vende(r)?|venta|registrar|registra|registrame|agrega|anade|añade|crear|crea|generar|genera|compra|comprar)"
+    m = re.search(rf"{verb_pattern}\s+(?:venta|compra)?\s*(?:de\s+)?(.+)", t)
+    if m:
+        candidate = m.group(1).strip()
+        # arregla cortes tipo "o nigiris" => "onigiris"
+        candidate = re.sub(r"\b(o|y)\b", " ", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+
+        if candidate_products:
+            match = process.extractOne(candidate, candidate_products, scorer=fuzz.token_sort_ratio)
+            if match and match[1] >= 70:
+                return match[0]
+        return candidate if candidate else None
+
+    # fallback: últimas 4 palabras
+    parts = t.split()
+    return " ".join(parts[-4:]) if parts else None
+
+# =========================
+# Orquestador principal
+# =========================
 def interpret_text(text: str, candidate_products: Optional[List[str]]=None) -> NLPResult:
     intent, conf = _guess_intent(text)
     notes: List[str] = []
@@ -139,6 +214,7 @@ def interpret_text(text: str, candidate_products: Optional[List[str]]=None) -> N
         sale.payment_method = _extract_payment_method(text) or "Efectivo"
         sale.date = _extract_date(text) or datetime.now()
         sale.product_name = _extract_product_name(text, candidate_products)
+
         entities = {
             "quantity": sale.quantity,
             "price": sale.price,
@@ -146,7 +222,7 @@ def interpret_text(text: str, candidate_products: Optional[List[str]]=None) -> N
             "date": sale.date.isoformat(),
             "product_name": sale.product_name,
         }
-        # notas de calidad
+
         if sale.product_name is None:
             notes.append("No se pudo identificar el producto con confianza.")
         if sale.price is None:
