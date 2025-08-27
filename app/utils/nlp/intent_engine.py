@@ -8,9 +8,8 @@ from datetime import datetime, timedelta
 from dateutil import parser as dateparser
 from rapidfuzz import fuzz, process
 
-# ===== Import al backend con guarda (para no romper tests locales) =====
+# ===== Import al backend con guarda (ajusta la ruta si difiere) =====
 try:
-    # Ajusta la ruta si tu estructura difiere
     from app.services.product_service import ProductService
 except Exception:
     ProductService = None  # Permite ejecutar este módulo sin backend
@@ -51,7 +50,7 @@ AYUDA_PATTERNS = [
 
 # Umbrales de selección
 AUTO_SELECT_SCORE = 85
-CONFIRM_SCORE_MIN = 70
+CONFIRM_SCORE_MIN = 70  # para UI; no autoselecciona por debajo de 85
 
 # =========================
 # Modelos de datos
@@ -181,7 +180,7 @@ def _extract_date(text: str) -> Optional[datetime]:
         return None
 
 def _extract_product_name(text: str) -> Optional[str]:
-    # Normaliza base
+    # Normal base
     t = _norm(text)
 
     # Quita números, montos y palabras de pago
@@ -191,11 +190,11 @@ def _extract_product_name(text: str) -> Optional[str]:
         t = re.sub(rf"\b{_norm(alias)}\b", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
 
-    # Normalizaciones de STT para "onigiri(s)" y variantes
+    # Normalizaciones de STT para "onigiri(s)" y variantes comunes
     t = re.sub(r"\boni\s*giri(s)?\b", " onigiris ", t)      # "oni giri", "onigiri(s)"
     t = re.sub(r"\boni?guiri(s)?\b", " onigiris ", t)       # "oniguiri(s)"
     t = re.sub(r"\bnigui?ri(s)?\b", " onigiris ", t)        # "niguiri(s)", "niguri(s)"
-    t = re.sub(r"\bo\s+nigui?ri(s)?\b", " onigiris ", t)    # "o nigiri(s)/niguiri(s)"
+    t = re.sub(r"\bo\s+nigui?ri(s)?\b", " onigiris ", t)    # "o niguiri(s)"
     t = re.sub(r"\s+", " ", t).strip()
 
     # Verbo + (venta|compra)? + (de)? + producto
@@ -206,10 +205,16 @@ def _extract_product_name(text: str) -> Optional[str]:
     if m:
         captured = m.group(1) if (m.lastindex and m.group(1) is not None) else ""
         candidate = captured.strip()
+
         if candidate:
-            # "o nigiris" -> "nigiris" ya lo captura arriba, reforzamos:
-            candidate = re.sub(r"\b(o|y)\b", " ", candidate)
-            candidate = re.sub(r"\s+", " ", candidate).strip()
+            # Elimina conectores de 1 letra (o, y, e) aislados
+            tokens = [tok for tok in candidate.split() if tok not in {"o", "y", "e"}]
+            # Si el STT partió una palabra en 2 tokens, vuelve a unir si son muy cortos
+            if len(tokens) == 2 and len(tokens[0]) <= 3 and len(tokens[1]) <= 5:
+                joined = "".join(tokens)
+                if re.search(r"onigiri(s)?", joined):
+                    tokens = [joined]
+            candidate = " ".join(tokens).strip()
 
     if candidate:
         return candidate
@@ -219,14 +224,83 @@ def _extract_product_name(text: str) -> Optional[str]:
     return " ".join(parts[-4:]) if parts else None
 
 # =========================
-# Candidatos: backend + locales
+# Búsqueda de productos: backend + locales
 # =========================
+def _dedupe(seq: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for s in seq:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+def _variants_for_lookup(name: str) -> List[str]:
+    """
+    Genera variantes tolerantes:
+      - original normalizado
+      - sin 'o|y|e' sueltos
+      - sin espacios
+      - sin stopwords básicas
+      - prefijos de 6 y 4 letras (útil para RTDB por prefijo)
+    """
+    n = _norm(name)
+    if not n:
+        return []
+    toks = n.split()
+
+    # sin conectores de 1 letra
+    no_single = [tok for tok in toks if len(tok) > 1 or tok not in {"o", "y", "e"}]
+    v1 = " ".join(no_single).strip()
+
+    # sin espacios (p.ej. "coca cola" -> "cocacola")
+    v2 = v1.replace(" ", "")
+
+    # sin stopwords sencillas
+    stop = {"de", "del", "la", "el", "los", "las", "un", "una", "para", "por", "en", "con"}
+    v3 = " ".join([t for t in no_single if t not in stop]).strip()
+
+    # prefijos útiles
+    v4 = v2[:6]
+    v5 = v2[:4]
+
+    candidates = [n, v1, v2, v3, v4, v5]
+    return [v for v in _dedupe(candidates) if v]
+
 def _search_products_in_backend(name: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Usa ProductService.find_by_name si está disponible."""
+    """
+    Intenta varias variantes con find_by_name (prefijo en RTDB).
+    Si no encuentra nada, hace fallback a ProductService.list(200) y aplica ranking fuzzy local.
+    """
     if not name or not ProductService:
         return []
     try:
-        return ProductService.find_by_name(name, limit=limit) or []
+        # 1) buscar por varias variantes
+        agg: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        for q in _variants_for_lookup(name):
+            res = ProductService.find_by_name(q, limit=limit) or []
+            for r in res:
+                rid = r.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    agg.append(r)
+
+        if agg:
+            return agg
+
+        # 2) fallback: listar y rankear localmente
+        all_items = ProductService.list(limit=200) or []
+        nn = _norm(name)
+        ranked = []
+        for item in all_items:
+            pname = _norm(item.get("name") or "")
+            score = fuzz.token_sort_ratio(nn, pname)
+            ranked.append({**item, "_score": int(score)})
+        ranked.sort(key=lambda x: x["_score"], reverse=True)
+        ranked = [r for r in ranked if r["_score"] >= 60][:limit]
+        return ranked
     except Exception:
         return []
 
@@ -257,10 +331,11 @@ def _normalize_local_candidates(items: Optional[List[Any]]) -> List[Dict[str, An
 
 def _select_best_candidate(name: str, candidates: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Ordena por similitud (token_sort_ratio) y retorna (mejor, ranked)."""
+    nn = _norm(name)
     ranked: List[Dict[str, Any]] = []
     for c in candidates:
-        pname = (c.get("name") or "").strip()
-        score = fuzz.token_sort_ratio(name, pname)
+        pname = _norm((c.get("name") or "").strip())
+        score = fuzz.token_sort_ratio(nn, pname)
         ranked.append({**c, "_score": int(score)})
     ranked.sort(key=lambda x: x["_score"], reverse=True)
     best = ranked[0] if ranked else None
@@ -277,7 +352,7 @@ def interpret_text(text: str, candidate_products: Optional[List[Any]] = None) ->
     if intent == "crear_venta":
         sale = ParsedSale()
         sale.quantity = _extract_quantity(text) or 1
-        sale.price = _extract_price(text)  # opcional: telemetría
+        sale.price = _extract_price(text)  # opcional/telemetría
         sale.payment_method = _extract_payment_method(text) or "Efectivo"
         sale.date = _extract_date(text) or datetime.now()
         sale.product_name = _extract_product_name(text)
@@ -286,9 +361,9 @@ def interpret_text(text: str, candidate_products: Optional[List[Any]] = None) ->
         candidates_aux: List[Dict[str, Any]] = []
 
         if sale.product_name:
-            # 1) Trae del backend
+            # Backend (find_by_name con variantes) + fallback list(200)
             raw_candidates = _search_products_in_backend(sale.product_name, limit=10)
-            # 2) Fusiona candidatos locales (opcionales) del front
+            # Fusiona candidatos locales del front (opcionales)
             local_candidates = _normalize_local_candidates(candidate_products)
             raw_candidates = (raw_candidates or []) + local_candidates
 
