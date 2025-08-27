@@ -8,12 +8,12 @@ from datetime import datetime, timedelta
 from dateutil import parser as dateparser
 from rapidfuzz import fuzz, process
 
-# ===== NUEVO: import ligero con guard =====
+# ===== Import al backend con guarda (para no romper tests locales) =====
 try:
-    # Ajusta el import si tu ruta real difiere
+    # Ajusta la ruta si tu estructura difiere
     from app.services.product_service import ProductService
 except Exception:
-    ProductService = None  # Permite testear este módulo sin backend
+    ProductService = None  # Permite ejecutar este módulo sin backend
 
 # =========================
 # Configuración / Diccionarios
@@ -49,6 +49,10 @@ AYUDA_PATTERNS = [
     r"\bcomo te uso\b",
 ]
 
+# Umbrales de selección
+AUTO_SELECT_SCORE = 85
+CONFIRM_SCORE_MIN = 70
+
 # =========================
 # Modelos de datos
 # =========================
@@ -72,6 +76,7 @@ class NLPResult:
 # Utilitarios
 # =========================
 def _norm(s: str) -> str:
+    """Minúsculas, sin tildes, sin puntuación, espacios normalizados."""
     if s is None:
         return ""
     s = s.lower()
@@ -89,6 +94,8 @@ def _match_any(patterns: List[str], text: str) -> bool:
 # =========================
 def _guess_intent(text: str) -> tuple[str, float]:
     nt = _norm(text)
+
+    # Reglas determinísticas
     if _match_any(CREAR_VENTA_PATTERNS, nt):
         return "crear_venta", 1.0
     if _match_any(LISTAR_VENTAS_PATTERNS, nt):
@@ -96,6 +103,7 @@ def _guess_intent(text: str) -> tuple[str, float]:
     if _match_any(AYUDA_PATTERNS, nt):
         return "ayuda", 0.9
 
+    # Respaldo fuzzy
     INTENT_KEYWORDS = {
         "crear_venta": [
             "vende", "venta", "registrar venta", "registrame",
@@ -121,12 +129,14 @@ def _guess_intent(text: str) -> tuple[str, float]:
 # =========================
 def _extract_quantity(text: str) -> Optional[int]:
     t = _norm(text)
+    # Dígitos: "x2", "2u", "2 und"
     m = re.search(r"(?:x\s*)?(\d+)\s*(?:u|und|unid|unidades)?\b", t)
     if m:
         try:
             return int(m.group(1))
         except:
             return None
+    # Palabras
     words_map = {"una":1,"un":1,"dos":2,"tres":3,"cuatro":4,"cinco":5,"seis":6,"siete":7,"ocho":8,"nueve":9,"diez":10}
     for w, n in words_map.items():
         if re.search(rf"\b{w}\b", t):
@@ -146,9 +156,11 @@ def _extract_price(text: str) -> Optional[float]:
 
 def _extract_payment_method(text: str) -> Optional[str]:
     t = _norm(text)
+    # Alias exacto
     for k, norm_pm in PAYMENT_ALIASES.items():
         if re.search(rf"\b{_norm(k)}\b", t):
             return norm_pm
+    # Fuzzy sobre label oficial
     match = process.extractOne(t, PAYMENT_METHODS, scorer=fuzz.partial_ratio)
     if match and match[1] >= 85:
         return match[0]
@@ -169,13 +181,24 @@ def _extract_date(text: str) -> Optional[datetime]:
         return None
 
 def _extract_product_name(text: str) -> Optional[str]:
+    # Normaliza base
     t = _norm(text)
+
+    # Quita números, montos y palabras de pago
     t = re.sub(r"\b\d+\b", " ", t)
     t = re.sub(r"(s\/\.?\s*\d+(?:[\.,]\d+)?|soles?)", " ", t)
     for alias in PAYMENT_ALIASES.keys():
         t = re.sub(rf"\b{_norm(alias)}\b", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
 
+    # Normalizaciones de STT para "onigiri(s)" y variantes
+    t = re.sub(r"\boni\s*giri(s)?\b", " onigiris ", t)      # "oni giri", "onigiri(s)"
+    t = re.sub(r"\boni?guiri(s)?\b", " onigiris ", t)       # "oniguiri(s)"
+    t = re.sub(r"\bnigui?ri(s)?\b", " onigiris ", t)        # "niguiri(s)", "niguri(s)"
+    t = re.sub(r"\bo\s+nigui?ri(s)?\b", " onigiris ", t)    # "o nigiri(s)/niguiri(s)"
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # Verbo + (venta|compra)? + (de)? + producto
     verb_pattern = r"(?:vende(r)?|venta|registrar|registra|registrame|agrega|anade|añade|crear|crea|generar|genera|compra|comprar)"
     m = re.search(rf"{verb_pattern}\s+(?:venta|compra)?\s*(?:de\s+)?(.+)", t)
 
@@ -184,23 +207,22 @@ def _extract_product_name(text: str) -> Optional[str]:
         captured = m.group(1) if (m.lastindex and m.group(1) is not None) else ""
         candidate = captured.strip()
         if candidate:
-            candidate = re.sub(r"\b(o|y)\b", " ", candidate)  # "o nigiris" -> "nigiris"
+            # "o nigiris" -> "nigiris" ya lo captura arriba, reforzamos:
+            candidate = re.sub(r"\b(o|y)\b", " ", candidate)
             candidate = re.sub(r"\s+", " ", candidate).strip()
 
     if candidate:
         return candidate
 
+    # Fallback: últimas 4 palabras
     parts = t.split()
     return " ".join(parts[-4:]) if parts else None
 
 # =========================
-# Resolución de product_id via RTDB (clave)
+# Candidatos: backend + locales
 # =========================
 def _search_products_in_backend(name: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """
-    Usa ProductService.find_by_name para traer candidatos (id, name, price, status, created_at).
-    Si ProductService no está disponible (tests), retorna [].
-    """
+    """Usa ProductService.find_by_name si está disponible."""
     if not name or not ProductService:
         return []
     try:
@@ -208,12 +230,34 @@ def _search_products_in_backend(name: str, limit: int = 10) -> List[Dict[str, An
     except Exception:
         return []
 
+def _normalize_local_candidates(items: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """
+    Acepta:
+      - list[str]                     -> {'id': None, 'name': str}
+      - list[dict{id,name}]           -> {'id': id|None, 'name': name}
+      - list[tuple(id, name)]         -> {'id': id|None, 'name': name}
+    """
+    out: List[Dict[str, Any]] = []
+    if not items:
+        return out
+    for it in items:
+        if isinstance(it, str) and it.strip():
+            out.append({"id": None, "name": it.strip()})
+        elif isinstance(it, dict):
+            name = str(it.get("name") or "").strip()
+            _id  = str(it.get("id") or "").strip() or None
+            if name:
+                out.append({"id": _id, "name": name})
+        elif isinstance(it, (tuple, list)) and len(it) >= 2:
+            _id  = str(it[0] or "").strip() or None
+            name = str(it[1] or "").strip()
+            if name:
+                out.append({"id": _id, "name": name})
+    return out
+
 def _select_best_candidate(name: str, candidates: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Ordena candidatos por similitud con 'name' (token_sort_ratio).
-    Retorna (mejor_candidato_o_None, candidatos_rankeados_con_score).
-    """
-    ranked = []
+    """Ordena por similitud (token_sort_ratio) y retorna (mejor, ranked)."""
+    ranked: List[Dict[str, Any]] = []
     for c in candidates:
         pname = (c.get("name") or "").strip()
         score = fuzz.token_sort_ratio(name, pname)
@@ -225,7 +269,7 @@ def _select_best_candidate(name: str, candidates: List[Dict[str, Any]]) -> Tuple
 # =========================
 # Orquestador principal
 # =========================
-def interpret_text(text: str) -> NLPResult:
+def interpret_text(text: str, candidate_products: Optional[List[Any]] = None) -> NLPResult:
     intent, conf = _guess_intent(text)
     notes: List[str] = []
     entities: Dict[str, Any] = {}
@@ -233,7 +277,7 @@ def interpret_text(text: str) -> NLPResult:
     if intent == "crear_venta":
         sale = ParsedSale()
         sale.quantity = _extract_quantity(text) or 1
-        sale.price = _extract_price(text)  # opcional/telemetría
+        sale.price = _extract_price(text)  # opcional: telemetría
         sale.payment_method = _extract_payment_method(text) or "Efectivo"
         sale.date = _extract_date(text) or datetime.now()
         sale.product_name = _extract_product_name(text)
@@ -242,29 +286,31 @@ def interpret_text(text: str) -> NLPResult:
         candidates_aux: List[Dict[str, Any]] = []
 
         if sale.product_name:
+            # 1) Trae del backend
             raw_candidates = _search_products_in_backend(sale.product_name, limit=10)
-            best, ranked = _select_best_candidate(sale.product_name, raw_candidates)
+            # 2) Fusiona candidatos locales (opcionales) del front
+            local_candidates = _normalize_local_candidates(candidate_products)
+            raw_candidates = (raw_candidates or []) + local_candidates
 
-            # Guardamos candidatos (id, name, _score) para UI (no enviar al backend)
+            best, ranked = _select_best_candidate(sale.product_name, raw_candidates)
             candidates_aux = [{"id": c.get("id"), "name": c.get("name"), "score": c.get("_score", 0)} for c in ranked]
 
-            if best and best.get("_score", 0) >= 85:
+            if best and best.get("_score", 0) >= AUTO_SELECT_SCORE:
                 product_id = best.get("id")
                 notes.append(f"Producto seleccionado automáticamente: '{best.get('name')}' (score={best.get('_score')}%).")
             elif ranked:
-                notes.append("Coincidencia ambigua: se requieren confirmación del producto.")
+                notes.append("Coincidencia ambigua: se requiere confirmación del producto.")
             else:
                 notes.append("No se encontraron productos en el catálogo para ese nombre.")
-
         else:
             notes.append("No se pudo extraer un nombre de producto desde el texto.")
 
-        # === Payload que espera tu POST ===
+        # === Payload que espera tu POST /sales ===
         entities = {
             "payment_method": sale.payment_method,
-            "product_id": product_id,   # None si ambiguo/no encontrado
+            "product_id": product_id,     # None si ambiguo/no encontrado
             "quantity": sale.quantity,
-            # Auxiliar para la UI (NO enviar al endpoint de creación):
+            # Auxiliar para la UI (NO enviar al endpoint de creación)
             "_candidates": candidates_aux
         }
 
