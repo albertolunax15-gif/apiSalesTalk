@@ -4,6 +4,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
+import os
+import csv
 
 from dateutil import parser as dateparser
 from rapidfuzz import fuzz, process
@@ -342,6 +344,89 @@ def _select_best_candidate(name: str, candidates: List[Dict[str, Any]]) -> Tuple
     return best, ranked
 
 # =========================
+# Soporte de DATASETS (CSV en misma carpeta)
+# =========================
+
+_DEFAULT_CATALOG_CANDIDATES: Optional[List[Dict[str, Any]]] = None
+_DEFAULT_DATASET_ROWS: Optional[List[Dict[str, str]]] = None
+
+def _here(*parts: str) -> str:
+    """Ruta absoluta relativa a este archivo."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, *parts)
+
+def load_product_catalog_csv(path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Lee products_catalog.csv (id,name,price) y devuelve [{'id','name'}, ...].
+    Si path es None, busca en la misma carpeta que este archivo.
+    """
+    global _DEFAULT_CATALOG_CANDIDATES
+    if _DEFAULT_CATALOG_CANDIDATES is not None:
+        return _DEFAULT_CATALOG_CANDIDATES
+
+    if path is None:
+        path = _here("products_catalog.csv")
+    if not os.path.exists(path):
+        _DEFAULT_CATALOG_CANDIDATES = []
+        return _DEFAULT_CATALOG_CANDIDATES
+
+    items: List[Dict[str, Any]] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        # normaliza nombres de columnas a lower
+        fieldnames = [c.lower() for c in (reader.fieldnames or [])]
+        # columnas mínimas
+        has_id = "id" in fieldnames
+        has_name = "name" in fieldnames
+        for row in reader:
+            # Si vienen con mayúsculas, DictReader ya da las claves tal cual;
+            # usamos get flexible (prueba ambas variantes)
+            name = (row.get("name") or row.get("Name") or row.get("NAME") or "").strip()
+            _id  = (row.get("id") or row.get("Id") or row.get("ID") or "").strip()
+            if not has_name:
+                # intenta detectar columna de nombre
+                for k in row.keys():
+                    if k.lower() == "name":
+                        name = (row.get(k) or "").strip()
+                        break
+            if not has_id:
+                for k in row.keys():
+                    if k.lower() == "id":
+                        _id = (row.get(k) or "").strip()
+                        break
+            if name:
+                items.append({"id": _id or None, "name": name})
+    _DEFAULT_CATALOG_CANDIDATES = items
+    return items
+
+def load_training_dataset_csv(path: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Lee sales_assistant_dataset.csv (text,intent,...) y devuelve lista de dicts.
+    Si path es None, busca en la misma carpeta que este archivo.
+    """
+    global _DEFAULT_DATASET_ROWS
+    if _DEFAULT_DATASET_ROWS is not None:
+        return _DEFAULT_DATASET_ROWS
+
+    if path is None:
+        path = _here("sales_assistant_dataset.csv")
+    if not os.path.exists(path):
+        _DEFAULT_DATASET_ROWS = []
+        return _DEFAULT_DATASET_ROWS
+
+    rows: List[Dict[str, str]] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append({k: v for k, v in row.items()})
+    _DEFAULT_DATASET_ROWS = rows
+    return rows
+
+def get_default_candidates() -> List[Dict[str, Any]]:
+    """Devuelve candidatos del catálogo CSV (cacheado)."""
+    return load_product_catalog_csv()
+
+# =========================
 # Orquestador principal
 # =========================
 def interpret_text(text: str, candidate_products: Optional[List[Any]] = None) -> NLPResult:
@@ -363,6 +448,12 @@ def interpret_text(text: str, candidate_products: Optional[List[Any]] = None) ->
         if sale.product_name:
             # Backend (find_by_name con variantes) + fallback list(200)
             raw_candidates = _search_products_in_backend(sale.product_name, limit=10)
+
+            # Si no hay backend o no devolvió nada, usa catálogo CSV por defecto
+            if not raw_candidates:
+                default_cands = get_default_candidates()
+                raw_candidates = (raw_candidates or []) + default_cands
+
             # Fusiona candidatos locales del front (opcionales)
             local_candidates = _normalize_local_candidates(candidate_products)
             raw_candidates = (raw_candidates or []) + local_candidates
