@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any, List
 from ..core.firebase import rtdb
 
 SALES_PATH = "/sales"
-
+#Commit
 
 class SaleRepo:
     @staticmethod
