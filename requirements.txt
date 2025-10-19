@@ -56,3 +56,6 @@ uvicorn==0.35.0
 edge-tts==6.1.18
 rapidfuzz==3.10.1
 python-dateutil==2.9.0.post0
+vosk
+websockets
+numpy

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.firebase import init_firebase
 from app.routers import auth, users, products, sales, nlp
+from app.routers import realtime, transcribe
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -30,12 +31,10 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
-    # ✅ Acepta GET y HEAD en raíz
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     async def root():
         return {"status": "ok", "service": "apisalestalk", "docs": "/docs"}
 
-    # ✅ (Opcional) Acepta GET y HEAD en health
     @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
     async def healthz():
         return {"ok": True}
@@ -45,6 +44,10 @@ def create_app() -> FastAPI:
     app.include_router(products.router)
     app.include_router(sales.router)
     app.include_router(nlp.router)
+
+    # router realtime al final (no rompe nada existente)
+    app.include_router(realtime.router)
+    app.include_router(transcribe.router)
 
     return app
 
