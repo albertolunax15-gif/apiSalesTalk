@@ -25,3 +25,5 @@ class ProductResponse(BaseModel):
 class ProductNameResponse(BaseModel):
     id: str
     name: str
+
+//str
