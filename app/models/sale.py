@@ -17,7 +17,7 @@ class SaleCreate(BaseModel):
             "example": {
                 "product_id": "2a3b4c",
                 "quantity": 2,
-                "payment_method": "Efectivo"
+                "payment_method": "Efectivo" 
                 # intencionalmente SIN "date"
             }
         }
