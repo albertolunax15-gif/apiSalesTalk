@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime, timezone
 import uuid
 
@@ -49,6 +49,56 @@ class SaleService:
     def list_sales_by_product(product_id: str, limit: int = 50) -> List[SaleResponse]:
         data = SaleRepo.list_by_product(product_id, limit)
         return [SaleResponse(**s) for s in data]
+    
+    @staticmethod
+    def report():
+        # Reporte global SIN parámetros: agrupa por día y usa hasta 1000 ventas
+        from ..repositories.product_repo import ProductRepo
+        from datetime import datetime
+
+        rows = SaleService.list_sales(1000)  # usa tu método existente
+
+        price_cache = {}
+        total_sales = 0
+        total_revenue = 0.0
+        buckets = {}
+
+        for sale in rows:
+            dt = getattr(sale, "date", None)
+            if not isinstance(dt, datetime):
+                continue
+
+            pid = sale.product_id
+            if pid not in price_cache:
+                prod = ProductRepo.get_by_id(pid)
+                price_cache[pid] = float(prod.get("price", 0)) if prod else 0.0
+
+            sale_total = price_cache[pid] * float(sale.quantity or 0)
+
+            total_sales += 1
+            total_revenue += sale_total
+
+            key = dt.strftime("%Y-%m-%d")  # agrupa por DÍA
+            if key not in buckets:
+                buckets[key] = {"count": 0, "total": 0.0}
+            buckets[key]["count"] += 1
+            buckets[key]["total"] += sale_total
+
+        avg_ticket = (total_revenue / total_sales) if total_sales else 0
+
+        return {
+            "group_by": "day",
+            "total_sales": total_sales,
+            "total_revenue": round(total_revenue, 2),
+            "avg_ticket": round(avg_ticket, 2),
+            "buckets": [
+                {"key": k, "count": v["count"], "total": round(v["total"], 2)}
+                for k, v in sorted(buckets.items())
+            ],
+        }
+
+
+
 
     @staticmethod
     def delete(sale_id: str) -> None:

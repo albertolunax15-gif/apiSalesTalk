@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from datetime import datetime
 
 PaymentMethod = Literal["Efectivo", "Tarjeta", "Yape", "Plin"]
@@ -30,3 +30,20 @@ class SaleResponse(BaseModel):
     payment_method: PaymentMethod
     date: datetime
     created_at: datetime
+
+GroupBy = Literal["day", "month", "none"]
+
+class SalesReportBucket(BaseModel):
+    key: str          # 'YYYY-MM-DD' | 'YYYY-MM' | 'all'
+    count: int        # número de ventas en el bucket
+    total: float      # ingresos (PEN) en el bucket
+
+class SalesReportResponse(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    group_by: GroupBy = "day"
+    currency: str = "PEN"
+    total_sales: int
+    total_revenue: float
+    avg_ticket: float
+    buckets: List[SalesReportBucket]

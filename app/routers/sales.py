@@ -21,3 +21,9 @@ def list_sales(
     current_user: dict = Depends(get_current_user)  # 🔒 Cualquier usuario logueado puede ver
 ):
     return SaleService.list_sales(limit)
+
+
+
+@router.get("/report")
+def report_sales(_=Depends(get_current_user)):  # mantiene autenticación, sin warning
+    return SaleService.report()
