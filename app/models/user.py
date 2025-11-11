@@ -17,4 +17,4 @@ class UserResponse(BaseModel):
     display_name: str
     role: Role
     disabled: bool = False
-    created_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None 
