@@ -27,3 +27,15 @@ def list_sales(
 @router.get("/report")
 def report_sales(_=Depends(get_current_user)):  # mantiene autenticación, sin warning
     return SaleService.report()
+
+@router.delete("/{sale_id}", status_code=204)
+def delete_sale(
+    sale_id: str,
+    current_user: dict = Depends(require_role("superadmin"))  # solo superadmin puede eliminar
+):
+    try:
+        SaleService.delete(sale_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
